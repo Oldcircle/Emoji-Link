@@ -3,7 +3,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { GameConfig, Card as CardType, DICTIONARY, STATIC_LEVELS, AIConfig } from '../types';
 import { generateGamePairs } from '../services/aiService';
 import { Card } from '../components/Card';
-import { Loader2, RotateCcw, Home, Clock, Hash, AlertTriangle } from 'lucide-react';
+import { Loader2, RotateCcw, Home, Clock, Hash, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 interface GameProps {
     config: GameConfig;
@@ -44,6 +44,11 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
     const [timer, setTimer] = useState(0);
     const [gameActive, setGameActive] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [isProcessing, setIsProcessing] = useState(false);
+
+    // Refs for safe access inside effects without triggering re-renders
+    const cardsRef = useRef(cards);
+    cardsRef.current = cards;
 
     // Track initialization to prevent double calls
     const initializedRef = useRef(false);
@@ -62,6 +67,7 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
         setMatchedIds(new Set());
         setFlippedIds([]);
         setCards([]);
+        setIsProcessing(false);
 
         try {
             let pairs: { word: string; emoji: string }[] = [];
@@ -85,7 +91,7 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
                 } catch (e) {
                     console.error("Game Init Error:", e);
                     setError(t.fallbackMessage);
-                    // Generate pairs handles fallback internally, but if it bubbled up:
+                    // Generate pairs handles fallback internally
                     pairs = []; 
                 }
             }
@@ -133,48 +139,74 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
     // Timer
     useEffect(() => {
         let interval: any;
-        if (gameActive) {
+        if (gameActive && !matchedIds.has("ALL")) {
             interval = setInterval(() => setTimer(t => t + 1), 1000);
         }
         return () => clearInterval(interval);
-    }, [gameActive]);
+    }, [gameActive, matchedIds]);
 
     // Match Logic
     useEffect(() => {
-        if (flippedIds.length === 2) {
-            setMoves(m => m + 1);
-            const [id1, id2] = flippedIds;
-            const card1 = cards.find(c => c.id === id1);
-            const card2 = cards.find(c => c.id === id2);
+        let isMounted = true;
 
-            if (card1 && card2 && card1.pairId === card2.pairId) {
-                setMatchedIds(prev => new Set(prev).add(card1.pairId));
-                setCards(prev => prev.map(c => 
-                    c.id === id1 || c.id === id2 ? { ...c, isMatched: true } : c
-                ));
-                setFlippedIds([]);
-            } else {
-                const timeoutId = setTimeout(() => {
+        if (flippedIds.length === 2) {
+            // Immediately block further interaction
+            setIsProcessing(true);
+            setMoves(m => m + 1);
+
+            const checkMatch = async () => {
+                // 1. Wait for the flip animation (600ms) to complete visually
+                await new Promise(resolve => setTimeout(resolve, 600));
+                
+                if (!isMounted) return;
+
+                const [id1, id2] = flippedIds;
+                const card1 = cardsRef.current.find(c => c.id === id1);
+                const card2 = cardsRef.current.find(c => c.id === id2);
+
+                if (card1 && card2 && card1.pairId === card2.pairId) {
+                    // MATCH FOUND
+                    setMatchedIds(prev => new Set(prev).add(card1.pairId));
+                    setCards(prev => prev.map(c => 
+                        c.id === id1 || c.id === id2 ? { ...c, isMatched: true, isFlipped: true } : c
+                    ));
+                    setFlippedIds([]);
+                    setIsProcessing(false);
+                } else {
+                    // MISMATCH
+                    // 2. Wait for the user to see the cards (1000ms)
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
+                    if (!isMounted) return;
+
+                    // 3. Unflip
                     setCards(prev => prev.map(c => 
                         c.id === id1 || c.id === id2 ? { ...c, isFlipped: false } : c
                     ));
                     setFlippedIds([]);
-                }, 1000);
-                return () => clearTimeout(timeoutId);
-            }
+                    setIsProcessing(false);
+                }
+            };
+
+            checkMatch();
         }
-    }, [flippedIds, cards]);
+
+        return () => { isMounted = false; };
+    }, [flippedIds]); 
 
     // Win Logic
     useEffect(() => {
         if (cards.length > 0 && matchedIds.size === cards.length / 2) {
             setGameActive(false);
+            setMatchedIds(prev => new Set(prev).add("ALL")); // Stop timer hack
             setTimeout(() => onEndGame(true, moves), 600);
         }
-    }, [matchedIds, cards, moves, onEndGame]);
+    }, [matchedIds, cards.length, moves, onEndGame]);
 
     const handleCardClick = (id: string) => {
-        if (!gameActive || flippedIds.length >= 2 || flippedIds.includes(id)) return;
+        // Block clicks if: Game Over, Processing Match, Already 2 Flipped, or Clicking Self
+        if (!gameActive || isProcessing || flippedIds.length >= 2 || flippedIds.includes(id)) return;
+        
         setCards(prev => prev.map(c => c.id === id ? { ...c, isFlipped: true } : c));
         setFlippedIds(prev => [...prev, id]);
     };
@@ -182,10 +214,10 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
     // Helper for grid class
     const getGridClass = () => {
         const count = cards.length;
-        if (count <= 12) return "grid-cols-3 sm:grid-cols-4"; // 6 pairs
-        if (count <= 16) return "grid-cols-4 sm:grid-cols-4"; // 8 pairs
-        if (count <= 20) return "grid-cols-4 sm:grid-cols-5"; // 10 pairs
-        return "grid-cols-4 sm:grid-cols-6"; // 12+ pairs
+        if (count <= 12) return "grid-cols-3 sm:grid-cols-4 max-w-xl"; 
+        if (count <= 16) return "grid-cols-4 sm:grid-cols-4 max-w-2xl"; 
+        if (count <= 20) return "grid-cols-4 sm:grid-cols-5 max-w-3xl"; 
+        return "grid-cols-4 sm:grid-cols-6 max-w-4xl"; 
     };
 
     if (loading) {
@@ -208,9 +240,9 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
     }
 
     return (
-        <div className="animate-flip-in max-w-4xl mx-auto pb-8">
+        <div className="animate-flip-in w-full pb-8 flex flex-col items-center">
             {/* Header HUD */}
-            <div className="flex flex-col sm:flex-row items-center justify-between mb-8 gap-4 sm:gap-0">
+            <div className="w-full max-w-4xl flex flex-col sm:flex-row items-center justify-between mb-6 gap-4 sm:gap-0">
                  <button onClick={onBack} className="bg-white p-3 rounded-xl shadow-sm border border-slate-200 text-slate-400 hover:text-slate-700 hover:border-slate-300 transition-all">
                     <Home size={22} />
                 </button>
@@ -229,7 +261,7 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
                     </div>
                 </div>
 
-                <div className="bg-indigo-50 px-4 py-2 rounded-xl border border-indigo-100 text-indigo-700 text-sm font-bold truncate max-w-[200px] text-center">
+                <div className="bg-white/80 backdrop-blur px-4 py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-bold truncate max-w-[200px] text-center shadow-sm">
                     {config.mode === 'adventure' 
                         ? `${t.level} ${config.currentLevel}` 
                         : config.sessionTopic}
@@ -237,14 +269,14 @@ export const Game: React.FC<GameProps> = ({ config, aiConfig, onEndGame, onBack 
             </div>
 
             {error && (
-                <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-center gap-3 text-amber-700 text-sm animate-flip-in">
+                <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-center gap-3 text-amber-700 text-sm animate-flip-in max-w-lg">
                     <AlertTriangle size={20} />
                     {error}
                 </div>
             )}
 
             {/* Grid */}
-            <div className={`grid gap-3 sm:gap-4 ${getGridClass()}`}>
+            <div className={`grid gap-3 sm:gap-4 w-full ${getGridClass()}`}>
                 {cards.map(card => (
                     <Card key={card.id} card={card} onClick={handleCardClick} />
                 ))}
